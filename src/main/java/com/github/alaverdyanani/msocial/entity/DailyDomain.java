@@ -4,11 +4,10 @@ import lombok.*;
 import javax.persistence.*;
 import java.time.LocalDate;
 
+@Data
+@Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@EqualsAndHashCode
-@Getter
-@Setter
 @Entity
 @Table(name = "daily_domains")
 public class DailyDomain {

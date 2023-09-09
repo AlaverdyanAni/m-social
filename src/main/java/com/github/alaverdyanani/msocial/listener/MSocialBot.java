@@ -1,100 +1,110 @@
 package com.github.alaverdyanani.msocial.listener;
 
-import com.github.alaverdyanani.msocial.client.TelegramBotClient;
-import com.github.alaverdyanani.msocial.dto.DailyDomainDto;
 import com.github.alaverdyanani.msocial.entity.User;
-import com.github.alaverdyanani.msocial.repository.UserRepository;
-import com.github.alaverdyanani.msocial.service.DailyDomainService;
+import com.github.alaverdyanani.msocial.scheduler.DailyDomainScheduler;
 import com.github.alaverdyanani.msocial.service.MessageService;
 import com.github.alaverdyanani.msocial.service.UserService;
 import lombok.SneakyThrows;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.telegram.telegrambots.bots.DefaultAbsSender;
+import org.telegram.telegrambots.bots.DefaultBotOptions;
 import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiRequestException;
-import org.telegram.telegrambots.meta.generics.BotOptions;
 import org.telegram.telegrambots.meta.generics.LongPollingBot;
 import org.telegram.telegrambots.util.WebhookUtils;
+import javax.transaction.Transactional;
 import java.io.IOException;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 
 @Component
-public class MSocialBot implements LongPollingBot {
-    private final TelegramBotClient telegramBotClient;
-    private final String botToken;
-    private final String botUserName;
-    private Update update;
-    private final UserRepository userRepository;
+public class MSocialBot extends DefaultAbsSender implements LongPollingBot {
+    private final Logger logger = LoggerFactory.getLogger(MSocialBot.class);
+
     private final UserService userService;
     private final MessageService messageService;
-    private  final DailyDomainService dailyDomainService;
-    public MSocialBot(TelegramBotClient telegramBotClient,
+    private final String botName;
+    public MSocialBot(@Value("${bot.name}")String botName,
                       @Value("${bot.token}")String botToken,
-                      @Value("${bot.username}")String botUserName,
-                      UserRepository userRepository, UserService userService,
-                      MessageService messageService, DailyDomainService dailyDomainService) {
-        this.telegramBotClient = telegramBotClient;
-        this.botToken = botToken;
-        this.botUserName = botUserName;
-        this.userRepository = userRepository;
+                      UserService userService,
+                      MessageService messageService) {
+
+        super(new DefaultBotOptions(), botToken);
+        this.botName = botName;
         this.userService = userService;
         this.messageService = messageService;
-        this.dailyDomainService = dailyDomainService;
     }
     @SneakyThrows
     @Override
     public void onUpdateReceived(Update update) {
-        if (update.getMessage().getText().startsWith("/start")) {
-                userService.saveUser(update.getMessage().getChatId());
-            SendMessage sendMessage = new SendMessage(String.valueOf(update.getMessage().getChatId()),"You are successfully registered!");
-        telegramBotClient.execute(sendMessage);
-        }else if (update.getMessage().hasText()){
-            messageService.saveMessage(update.getMessage().getChatId(),update.getMessage().getText());
-            SendMessage sendMessage = new SendMessage(String.valueOf(update.getMessage().getChatId()),"Your message has been successfully saved!");
-       telegramBotClient.execute(sendMessage);
+        logger.info("Update received " + update);
+        if (update.hasMessage()) {
+            long userChatId = update.getMessage().getFrom().getId();
+            Optional<User> userOptional = userService.findByChatId(userChatId);
+            if (userOptional.isEmpty()) {
+                userService.createUser(userChatId);
+            } else {
+                userService.updateMessageTime(userOptional.get());
+            }
+            String receivedMessage = update.getMessage().getText();
+            messageService.createReceivedMessage(receivedMessage, userChatId);
+            String sendMessage;
+            if ("/start".equals(receivedMessage)) {
+                sendMessage = "Hello " + update.getMessage().getFrom().getFirstName();
+            } else {
+                sendMessage = "Echo: " + update.getMessage().getText();
+            }
+            createAndSendMessage(userChatId, sendMessage);
         }
     }
+    private  void createAndSendMessage(long userChatId, String sendMessage){
+        try {
+            execute(SendMessage.builder()
+                .chatId(userChatId)
+                .text(sendMessage)
+                .build());
+        } catch (TelegramApiException e){
+            logger.error(e.getMessage(),e);
+        }
+        messageService.createSendMessage(sendMessage, userChatId);
+        logger.info("Message:\"" + sendMessage + "\" sent and saved!");
+    }
 
+    @Scheduled(cron = "${cron.value}")
+    @Async
+    @Transactional
+    public void  scheduled() {
+        int count = 0;
+        try {
+            count = DailyDomainScheduler.fetchAndUpdateData();
+        } catch (IOException e) {
+            logger.error(Arrays.toString(e.getStackTrace()));
+        }
+        DateTimeFormatter dateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+        LocalDateTime now = LocalDateTime.now();
+        String message = dateTimeFormatter.format(now) + ". Collected " + count + " domens.";
+        List<Long> userChatIds = userService.getAllUsersChatIds();
+        for (Long userChatId : userChatIds) {
+            createAndSendMessage(userChatId, message);
+        }
+    }
     @Override
-    public BotOptions getOptions() {
-        return telegramBotClient.getOptions();
+    public String getBotUsername() {
+        return botName;
     }
 
     @Override
     public void clearWebhook() throws TelegramApiRequestException {
-        WebhookUtils.clearWebhook(telegramBotClient);
-
+        WebhookUtils.clearWebhook(this);
     }
-
-    @Override
-    public String getBotUsername() {
-        return botUserName;
-    }
-
-    @Override
-    public String getBotToken() {
-        return botToken;
-    }
-
-
-    @Scheduled(cron = "@daily")
-    public void saveDailyDomains() throws IOException {
-        dailyDomainService.saveDailyDomains();
-    }
-    @Scheduled(cron = "@daily")
-    public void sendDailyDomains() throws TelegramApiException {
-        List<DailyDomainDto> dailyDomainDtos = dailyDomainService.sendDailyDomains();
-        List<User> users = userRepository.findAll();
-        for (User user : users) {
-            SendMessage dailyDomains = new SendMessage();
-            dailyDomains.setChatId(user.getChatId());
-            dailyDomains.setText(dailyDomainDtos.toString());
-            telegramBotClient.execute(dailyDomains);
-
-        }
-    }
-
 }
