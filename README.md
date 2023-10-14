@@ -3,10 +3,11 @@
 
 Используемые технологии
 
-- Java 11 - 14
+- Java 11
 - Maven
-- Spring Boot 2
+- Spring Boot
 - PostgreSQL
+- Lombok
 - Liquibase для миграций БД
 - Настроенное логгирование с помощью spring-boot-starter-logging (ежедневное ротирование log файла)
 - telegrambots-spring-boot-starter для реализации функционала телеграм бота
